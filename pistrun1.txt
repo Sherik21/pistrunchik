@@ -1,0 +1,941 @@
+local IslandsConfig = require(game:GetService("ReplicatedStorage").Framework.Shared.Configs.IslandsConfig)
+local QuestConfig = require(game:GetService("ReplicatedStorage").Modules.QuestConfig)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+local ScriptSettings = {}
+
+local RequestHit = game:GetService("ReplicatedStorage"):WaitForChild("CombatSystem"):WaitForChild("Remotes"):WaitForChild("RequestHit")
+local RequestAbility = game:GetService("ReplicatedStorage"):WaitForChild("AbilitySystem"):WaitForChild("Remotes"):WaitForChild("RequestAbility")
+local RequestInventory = game:GetService("ReplicatedStorage").Remotes.RequestInventory
+local UpdateInventory = game:GetService("ReplicatedStorage").Remotes.UpdateInventory
+local SettingsToggle = game:GetService("ReplicatedStorage"):WaitForChild("RemoteEvents"):WaitForChild("SettingsToggle")
+
+local PlayerInventory = {}
+UpdateInventory.OnClientEvent:Connect(function(...)
+    local args = {...}
+
+    PlayerInventory[args[1]] = args[2]
+end)
+
+local CurrentSea = require(game.ReplicatedStorage:WaitForChild("PlaceConfig")).IsSea2() and 2 or 1
+
+local MaxYOffset = 205
+local InstaTeleportDistance = 100
+
+local QuestNPCS = {
+    ["Slime"] = "SlimeWarrior"
+}
+
+local Islands = {
+    [1] = {
+        ["Jungle"] = Vector3.new(-391.22314453125, -1.4500732421875, 407.0733947753906),
+        ["Shibuya"] = Vector3.new(1269.927490234375, 13.107885360717773, 233.70895385742188),
+        ["Desert"] = Vector3.new(-687.02587890625, -0.7509737014770508, -286.9804382324219),
+        ["HollowIsland"] = Vector3.new(-541.95703125, -0.7992043495178223, 872.7455444335938),
+        ["Dungeon"] = Vector3.new(1272.4840087890625, 5, -896.0214233398438),
+        ["Boss"] = Vector3.new(593.32421875, -1.511749267578125, -1051.1448974609375),
+        ["Sailor"] = Vector3.new(182.10618591308594, 5.119688510894775, 669.5240478515625),
+        ["Shinjuku"] = Vector3.new(189.82330322265625, -0.5995659828186035, -1642.830810546875),
+        ["Starter"] = Vector3.new(-70.04393005371094, -1.462585687637329, -298.7870788574219),
+        ["Slime"] = Vector3.new(-981.010498046875, -1.7989394664764404, 275.525634765625),
+        ["Snow"] = Vector3.new(-181.16307067871094, -0.07506006956100464, -997.12646484375),
+        ["Academy"] = Vector3.new(962.33203125, -1.9149303436279297, 1053.56201171875),
+        ["Ninja"] = Vector3.new(-1620.47412109375, 10.833394050598145, -574.9290771484375),
+        ["Tower"] = Vector3.new(1276.146728515625, -3.5167980194091797, -1473.35888671875),
+        ["Lawless"] = Vector3.new(209.31887817382812, -3.5029754638671875, 1673.65087890625),
+        ["World"] = Vector3.new(-941.228759765625, 323.35675048828125, -2132.58984375),
+        ["Judgement"] = Vector3.new(-1098.8743896484375, -8.934999465942383, -1116.758544921875)
+    }
+}
+
+local SafeTeleport = {}
+function SafeTeleport.New()
+    return setmetatable(SafeTeleport, {
+        TeleportData = nil,
+        IsTeleport = false,
+        TeleportSpeed = 150,
+        PreventFallAfterTeleport = false,
+    })
+end
+function SafeTeleport:CheckCharacter()
+    return (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head") and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character:FindFirstChild("Humanoid") and LocalPlayer.Character:FindFirstChild("Humanoid").Health > 0)
+end
+function SafeTeleport:LoopForCharacter()
+    if not self:CheckCharacter() then
+        repeat task.wait(.5) until self:CheckCharacter()
+    end
+end
+function SafeTeleport:RawTeleport(cframe, ignoreAC)
+    local PrimaryPart = LocalPlayer.Character.HumanoidRootPart
+    local checked = 0
+    local startTime = tick()
+
+    if not ignoreAC then
+        while task.wait(0.1) do
+            if not self:CheckCharacter() then return false end
+
+            if PrimaryPart.CFrame == cframe then
+                checked += 1
+            else
+                PrimaryPart.CFrame = cframe
+                checked = 0
+            end
+
+            if checked > 15 then
+                return true
+            end
+
+            if tick() - startTime > 4 then
+                return false
+            end
+        end
+    else
+        PrimaryPart.CFrame = cframe
+    end
+
+    return true
+end
+function SafeTeleport:Teleport(cframe, offset, YoffsetEnabled, IgnoreAC)
+    if self.IsTeleport then return end
+    offset = offset or CFrame.new(0,0,0)
+
+    self:LoopForCharacter()
+    self:Stop()
+
+    local PrimaryPart = LocalPlayer.Character.HumanoidRootPart
+    local Head = LocalPlayer.Character.Head
+    local Humanoid: Humanoid = LocalPlayer.Character.Humanoid
+
+    if not Head:FindFirstChild("NoFall") then
+        local NoFallVelocity = Instance.new("BodyVelocity", Head)
+        NoFallVelocity.Velocity = Vector3.new()
+        NoFallVelocity.Name = "NoFall"
+    end
+
+    Humanoid.PlatformStand = true
+
+    local CurrentDistance = (PrimaryPart.Position - cframe.Position).Magnitude
+
+    if CurrentDistance < InstaTeleportDistance then
+        self:RawTeleport(cframe * offset, IgnoreAC)
+        self:Stop()
+        return
+    end
+
+    if YoffsetEnabled then
+        local x, y, z, R00, R01, R02, R10, R11, R12, R20, R21, R22 = cframe:GetComponents()
+        local goalYOffseted = CFrame.new(x, MaxYOffset, z, R00, R01, R02, R10, R11, R12, R20, R21, R22)
+        local playerYOffseted = CFrame.new(PrimaryPart.Position.X, MaxYOffset, PrimaryPart.Position.Z)
+
+        task.wait(1)
+
+        PrimaryPart.CFrame = playerYOffseted
+
+        if not self:RawTeleport(playerYOffseted, IgnoreAC) then
+            self:Stop()
+            return
+        end
+
+        task.wait(1)
+
+        local Distance = (playerYOffseted.Position - goalYOffseted.Position).Magnitude
+        local TInfo = TweenInfo.new(Distance / (self.TeleportSpeed or 150), Enum.EasingStyle.Linear)
+        self.TeleportData = TweenService:Create(PrimaryPart, TInfo, {CFrame = goalYOffseted})
+
+        self.IsTeleport = true
+        self.TeleportData:Play()
+
+        local savedTeleportData = self.TeleportData
+        local connection
+        task.spawn(function()
+            while task.wait() do
+                if savedTeleportData ~= self.TeleportData or not SafeTeleport:CheckCharacter() then
+                    if connection then
+                        self.IsTeleport = false
+                        connection:Disconnect()
+                    end
+                    break
+                end
+            end
+        end)
+
+        connection = self.TeleportData.Completed:Connect(function()
+            self:RawTeleport(goalYOffseted, IgnoreAC)
+            task.wait(1)
+            self:RawTeleport(cframe * offset, IgnoreAC)
+            self:Stop()
+        end)
+    end
+
+    if not YoffsetEnabled then
+        local Distance = (PrimaryPart.Position - cframe.Position).Magnitude
+        local TInfo = TweenInfo.new(Distance / (self.TeleportSpeed or 150), Enum.EasingStyle.Linear)
+        self.TeleportData = TweenService:Create(PrimaryPart, TInfo, {CFrame = cframe * offset})
+
+        self.IsTeleport = true
+        self.TeleportData:Play()
+
+        self.TeleportData.Completed:Connect(function()
+            self:Stop()
+        end)
+    end
+end
+function SafeTeleport:Stop()
+    SafeTeleport:LoopForCharacter()
+
+    if self.TeleportData then
+        self.TeleportData:Cancel()
+        self.TeleportData = nil
+    end
+
+    if not self.PreventFallAfterTeleport then
+        SafeTeleport:LoopForCharacter()
+        LocalPlayer.Character.Humanoid.PlatformStand = false
+        if LocalPlayer.Character.Head:FindFirstChild("NoFall") then
+            LocalPlayer.Character.Head:FindFirstChild("NoFall"):Destroy()
+        end
+    end
+
+    self.IsTeleport = false
+
+end
+function SafeTeleport:Yield()
+    repeat task.wait() until not self.TeleportData and not self.IsTeleport
+end
+
+function SafeTeleport:CustomTeleport(cframe, offset, YoffsetEnabled, Yield, IgnoreAC)
+    local PrimaryPart = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
+
+    if not PrimaryPart then
+        return
+    end
+
+    local dist = math.huge
+    local island = nil
+    local island_vector = nil
+
+    for IslandId, PortalVector in Islands[CurrentSea] do
+        if (PortalVector - cframe.Position).Magnitude < dist then
+            island = IslandId
+            island_vector = PortalVector
+            dist = (PortalVector - cframe.Position).Magnitude
+        end
+    end
+
+    local DistanceToPlayer = (PrimaryPart.Position - cframe.Position).Magnitude
+    local DistanceToIslandPortal = (island_vector - cframe.Position).Magnitude
+
+    print(island, DistanceToIslandPortal - DistanceToPlayer, DistanceToIslandPortal - DistanceToPlayer < 0)
+
+    if DistanceToIslandPortal - DistanceToPlayer < 0 then
+        repeat
+            game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("TeleportToPortal"):FireServer(island)
+            task.wait(.25)
+        until getDist(island_vector) < 30
+        task.wait(2)
+        self:Teleport(cframe, offset, YoffsetEnabled, IgnoreAC)
+    else
+        self:Teleport(cframe, offset, YoffsetEnabled, IgnoreAC)
+    end
+
+    if Yield then
+        self:Yield()
+    end
+end
+
+
+local PlayerTeleport = SafeTeleport.New()
+
+
+function getCFramesForPortals()
+    local PortalConfig = require(game:GetService("ReplicatedStorage").PortalConfig)
+
+    local Portals = PortalConfig.GetSortedPortals()
+    local positions = {}
+
+    for i,v in Portals do
+        if (v.data.Sea or 1) == CurrentSea then
+            game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("TeleportToPortal"):FireServer(v.id)
+            task.wait(2)
+            local Portal = workspace:FindFirstChild(v.data.IslandFolder):FindFirstChildOfClass("Part")
+
+            if not Portal then
+                print("Not found portal for", v.id)
+            else
+                positions[v.id] = Portal.Position
+            end
+        end
+    end
+    local str = "{\n"
+    for i,v in positions do
+        str = str .. '  ["' .. i .. '"] = Vector3.new(' .. v.X .. ', ' .. v.Y .. ', ' .. v.Z .. '),\n'
+    end
+
+    str = str .. "}"
+    print(str)
+    setclipboard(str)
+end
+
+function getTools()
+    local tools = {}
+
+    for _,v in LocalPlayer.Backpack:GetChildren() do
+        if v:IsA("Tool") then
+            table.insert(tools, v.Name)
+        end
+    end
+
+    for _,v in LocalPlayer.Character:GetChildren() do
+        if v:IsA("Tool") then
+            table.insert(tools, v.Name)
+        end
+    end
+
+    return tools
+end
+
+function equipTool(toolName)
+    if LocalPlayer.Backpack:FindFirstChild(toolName) then
+        LocalPlayer.Character.Humanoid:EquipTool(LocalPlayer.Backpack:FindFirstChild(toolName))
+    end
+end
+
+function getDist(position)
+    return (LocalPlayer.Character.HumanoidRootPart.Position - position).Magnitude
+end
+
+function getAvailableAbilities()
+    local Ability = {}
+
+    local SpecInfoFrame = LocalPlayer.PlayerGui["CD Ability UI"].SpecInfoFrame
+
+    for _, child in SpecInfoFrame:GetChildren() do
+        if child.Name == "SkillMainHolder" and child.Visible then
+            local SkillHolder = child.SkillHolder
+            local KeyBind = SkillHolder.SkillName.ContentText:sub(1,1)
+            local IsOnCooldown = SkillHolder.LoaderFrameThatHidesAfterLoaded.Visible
+            
+            if not IsOnCooldown and table.find(ScriptSettings.SelectedSkills or {}, KeyBind) then
+                table.insert(Ability, {Keybind = KeyBind})
+            end
+
+        end
+    end
+
+    return Ability
+end
+
+local SkillToNumber = {
+    Z = 1,
+    X = 2,
+    C = 3,
+    V = 4,
+    F = 5,
+    N = 6
+}
+
+function useSkill()
+    local Abilities = getAvailableAbilities()
+    if #Abilities == 0 then return end
+
+    local Skill = Abilities[math.random(#Abilities)]
+
+    RequestAbility:FireServer(SkillToNumber[Skill.Keybind])
+end
+
+function getNPC(npcName)
+    if workspace.NPCs:FindFirstChild(npcName) then
+        return workspace.NPCs:FindFirstChild(npcName)
+    end
+end
+
+function getAllMobs(exceptBosses)
+    local npcs = {}
+    for _, npc in workspace.NPCs:GetChildren() do
+        local npcName = npc.Name
+        if tonumber(npcName:sub(-1)) then
+            npcName = npcName:sub(1, -2)
+        end
+
+        if npcName:find("Boss") and exceptBosses then
+            continue
+        end
+
+        if not table.find(npcs, npcName) then
+            table.insert(npcs, npcName)
+        end
+    end
+
+    table.sort(npcs)
+
+    return npcs
+end
+
+function getCenterPosition(models)
+    local sum = Vector3.zero
+
+    for _, model in ipairs(models) do
+        local cf = model:GetPivot()
+        sum += cf.Position
+    end
+
+    return sum / #models
+end
+
+function getMiddleNPC(models)
+    local centerPos = getCenterPosition(models)
+
+    local closestModel = nil
+    local closestDist = math.huge
+
+    for _, model in ipairs(models) do
+        local dist = (model:GetPivot().Position - centerPos).Magnitude
+        if dist < closestDist then
+            closestDist = dist
+            closestModel = model
+        end
+    end
+
+    return closestModel
+end
+
+function checkAutoFarmAvailable()
+    return ScriptSettings.AutoFarmMob
+end
+
+function autoFarmRegularNPC(npcName)
+    for i = 1, 5 do
+        local npcModel = getNPC(npcName .. i)
+        if npcModel then
+            if not checkAutoFarmAvailable() then break end
+            PlayerTeleport:CustomTeleport((npcModel:FindFirstChild("HumanoidRootPart") and npcModel.HumanoidRootPart.CFrame) or npcModel:GetPivot(), CFrame.new(0, 15, 0), false, false, true)
+            PlayerTeleport:Yield()
+
+            local modelsTable = {}
+
+            for n = 1, 5 do
+                local model = getNPC(npcName .. n)
+                if model then
+                    table.insert(modelsTable, model)
+                end
+            end
+
+            local middleNPC = getMiddleNPC(modelsTable)
+            npcModel = middleNPC
+
+            local SavedX = ScriptSettings.XOffset
+            local SavedY = ScriptSettings.YOffset
+            local SavedZ = ScriptSettings.ZOffset
+
+            PlayerTeleport:CustomTeleport((npcModel:FindFirstChild("HumanoidRootPart") and npcModel.HumanoidRootPart.CFrame) or npcModel:GetPivot(), CFrame.new(ScriptSettings.XOffset or 0, ScriptSettings.YOffset or 10, ScriptSettings.ZOffset or 0), false, false, true)
+            local latestCFrame = (npcModel:FindFirstChild("HumanoidRootPart") and npcModel.HumanoidRootPart.CFrame) or npcModel:GetPivot()
+
+            repeat
+                if not checkAutoFarmAvailable() then break end
+                PlayerTeleport:LoopForCharacter()
+
+                if SavedX ~= ScriptSettings.XOffset or SavedZ ~= ScriptSettings.ZOffset or SavedY ~= ScriptSettings.YOffset then
+                    SavedX = ScriptSettings.XOffset
+                    SavedY = ScriptSettings.YOffset
+                    SavedZ = ScriptSettings.ZOffset
+
+                    PlayerTeleport:CustomTeleport((npcModel:FindFirstChild("HumanoidRootPart") and npcModel.HumanoidRootPart.CFrame) or npcModel:GetPivot(), CFrame.new(ScriptSettings.XOffset or 0, ScriptSettings.YOffset or 10, ScriptSettings.ZOffset or 0), false, false, true)
+                end
+
+                if getDist(latestCFrame.Position) > 25 then
+                    PlayerTeleport:LoopForCharacter()
+                    PlayerTeleport:CustomTeleport((npcModel:FindFirstChild("HumanoidRootPart") and npcModel.HumanoidRootPart.CFrame) or npcModel:GetPivot(), CFrame.new(ScriptSettings.XOffset or 0, ScriptSettings.YOffset or 10, ScriptSettings.ZOffset or 0), false, true, false)
+                end
+
+                PlayerTeleport.PreventFallAfterTeleport = true
+                RequestHit:FireServer()
+                
+                if ScriptSettings.AutoSkillTool then
+                    useSkill()
+                end
+
+                task.wait(0.15)
+            until not checkAutoFarmAvailable() or not npcModel or not npcModel.Parent or not npcModel:FindFirstChild("Humanoid") or npcModel.Humanoid.Health <= 0
+        
+            if checkAutoFarmAvailable() then
+                local model = nil
+                repeat
+                    task.wait(.15)
+                    model = workspace.NPCs:FindFirstChild(npcModel.Name)
+                    RequestHit:FireServer()
+
+                    if ScriptSettings.AutoSkillTool then
+                        useSkill()
+                    end
+
+                until (model and model:FindFirstChild("Humanoid") and model.Humanoid.Health > 0) or not checkAutoFarmAvailable()
+
+            end
+            
+            break
+        end
+    end
+
+    if not checkAutoFarmAvailable() then
+        PlayerTeleport.PreventFallAfterTeleport = false
+    end
+
+    PlayerTeleport:Stop()
+end
+
+function useItem(item_name, quantity)
+    game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("UseItem"):FireServer("Use", item_name, quantity, false)
+end
+
+function checkOwns(item_name)
+    for _,v in PlayerInventory do
+        for _,v2 in v do
+            if v2.name == item_name then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+function getCurrentQuestTitle()
+	return LocalPlayer.PlayerGui.QuestUI.Quest.Quest.Holder.Content.QuestInfo.QuestTitle.QuestTitle.ContentText
+end
+
+function swapQuest()
+	local Button = LocalPlayer.PlayerGui.QuestUI.Quest.Quest.Holder.Content.QuestSwitchButton
+
+	for _, v in getconnections(Button.MouseButton1Click) do
+		v.Function()
+	end
+end
+
+function declineRepeatableQuest()
+	local Button = LocalPlayer.PlayerGui.QuestUI.Quest.Quest.Holder.Content.Exit.CloseButton
+
+	for _, v in getconnections(Button.MouseButton1Click) do
+		v.Function()
+	end
+end
+
+function isRepeatableQuest(q)
+	q = q or 1
+	for _, questData in QuestConfig.RepeatableQuests do
+		if questData.title == getCurrentQuestTitle() then
+			return true
+		end
+	end
+
+	swapQuest()
+
+	if q > 1 then
+		return "NoQuest"
+	end
+
+	return isRepeatableQuest(q + 1)
+end
+
+function getQuestForNPC(npcName)
+    if QuestNPCS[npcName] then
+        npcName = QuestNPCS[npcName]
+    end
+
+	for questGiver, questData in QuestConfig.RepeatableQuests do
+		if questData.requirements[1].npcType == npcName then
+			return questGiver, questData
+		end
+	end
+end
+
+function acceptQuest(questGiver)
+    if workspace.ServiceNPCs:FindFirstChild(questGiver) then
+        local model = workspace.ServiceNPCs:FindFirstChild(questGiver)
+        PlayerTeleport.PreventFallAfterTeleport = false
+        PlayerTeleport:CustomTeleport((model:FindFirstChild("HumanoidRootPart") and model.HumanoidRootPart.CFrame) or model:GetPivot(), CFrame.new(), false, true, false)
+        task.wait(1)
+        fireproximityprompt(model:FindFirstChildWhichIsA("ProximityPrompt", true))
+        task.wait(1)
+    else
+        print(questGiver, "not found, sad, rn without fix")
+    end
+end
+
+-- Ui
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+    Name = "NoName Hub",
+    Icon = 0,
+    LoadingTitle = "Loading Hub..",
+    LoadingSubtitle = "by Essenly",
+    ShowText = "NoName Hub",
+    Theme = "Default",
+
+    ToggleUIKeybind = "K",
+
+    DisableRayfieldPrompts = true,
+    DisableBuildWarnings = true,
+
+    -- ScriptID = "sid_xxxxxxxxxxxx", -- Your Script ID from developer.sirius.menu — enables analytics, managed keys, and script hosting
+
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "NoName_Hub", -- Create a custom folder for your hub/game
+        FileName = "SailorPiece_"..LocalPlayer.Name
+    },
+})
+
+-- Tabs
+
+local Farm = Window:CreateTab("Farm")
+local Misc = Window:CreateTab("Misc")
+local Shop = Window:CreateTab("Shop")
+
+-- Farm
+
+Farm:CreateSection("Settings")
+
+local SelectTool = Farm:CreateDropdown({
+    Name = "Select Tool",
+    Options = getTools(),
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "SelectedTool",
+    Callback = function(option)
+        ScriptSettings.SelectedTool = option[1]
+    end
+})
+
+Farm:CreateDropdown({
+    Name = "Select Auto Skill",
+    Options = {"Z", "X", "C", "V", "F"},
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "SelectedSkills",
+    Callback = function(option)
+        ScriptSettings.SelectedSkills = option
+    end
+})
+
+Farm:CreateButton({
+    Name = "Refresh Tools",
+    Callback = function()
+        SelectTool:Refresh(getTools())
+    end
+})
+
+Farm:CreateDivider()
+
+Farm:CreateSlider({
+    Name = "X Offset",
+    Range = {-10, 10},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 0,
+    Flag = "XOffset",
+    Callback = function(Value)
+        ScriptSettings.XOffset = Value
+    end,
+})
+
+Farm:CreateSlider({
+    Name = "Y Offset",
+    Range = {-10, 40},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 10,
+    Flag = "YOffset",
+    Callback = function(Value)
+        ScriptSettings.YOffset = Value
+    end,
+})
+
+Farm:CreateSlider({
+    Name = "Z Offset",
+    Range = {-10, 10},
+    Increment = 1,
+    Suffix = "",
+    CurrentValue = 0,
+    Flag = "ZOffset",
+    Callback = function(Value)
+        ScriptSettings.ZOffset = Value
+    end,
+})
+
+
+Farm:CreateDivider()
+
+Farm:CreateToggle({
+    Name = "Auto Equip",
+    CurrentValue = false,
+    Flag = "AutoEquipTool",
+    Callback = function(value)
+        ScriptSettings.AutoEquipTool = value
+    end
+})
+
+Farm:CreateToggle({
+    Name = "Auto Skill",
+    CurrentValue = false,
+    Flag = "AutoSkillTool",
+    Callback = function(value)
+        ScriptSettings.AutoSkillTool = value
+    end
+})
+
+Farm:CreateToggle({
+    Name = "Auto Quest",
+    CurrentValue = false,
+    Flag = "AutoQuest",
+    Callback = function(value)
+        ScriptSettings.AutoQuest = value
+    end
+})
+
+Farm:CreateSection("Mob Farm")
+
+Farm:CreateDropdown({
+    Name = "Select Mob",
+    Options = getAllMobs(true),
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "SelectedMob",
+    Callback = function(option)
+        ScriptSettings.SelectedMob = option[1]
+    end
+})
+
+Farm:CreateToggle({
+    Name = "Auto Farm Mob",
+    CurrentValue = false,
+    Flag = "AutoFarmMob",
+    Callback = function(value)
+        ScriptSettings.AutoFarmMob = value
+    end
+})
+
+-- Misc
+Misc:CreateSection("Player")
+
+Misc:CreateToggle({
+    Name = "Noclip",
+    CurrentValue = false,
+    Flag = "Noclip",
+    Callback = function(value)
+        ScriptSettings.Noclip = value
+    end
+})
+
+Misc:CreateSection("Inventory")
+
+Misc:CreateToggle({
+    Name = "Auto Open ALL Chests",
+    CurrentValue = false,
+    Flag = "AutoOpenAllChests",
+    Callback = function(value)
+        ScriptSettings.AutoOpenAllChests = value
+    end
+})
+
+Misc:CreateSection("Easter Event")
+
+Misc:CreateButton({
+    Name = "Collect ALL Spawned Eggs",
+    Callback = function()
+        pcall(function()
+            for _, child: Model in workspace.EasterEggs:GetChildren() do
+                if child.Name:find("EasterEgg") then
+                    PlayerTeleport.PreventFallAfterTeleport = true
+                    PlayerTeleport:CustomTeleport(child:GetPivot(), nil, nil, true)
+                    for i = 1, 4 do
+                        task.wait(1)
+                        if child:FindFirstChildWhichIsA("ProximityPrompt", true) then
+                            fireproximityprompt(child:FindFirstChildWhichIsA("ProximityPrompt", true))
+                        end
+                    end
+
+                end
+            end
+        end)
+
+        PlayerTeleport.PreventFallAfterTeleport = false
+        PlayerTeleport:Stop()
+    end
+})
+
+-- Shop
+
+Shop:CreateSection("Sword")
+
+local DarkBladeToggle = Shop:CreateToggle({
+    Name = "Auto Buy Dark Blade",
+    CurrentValue = false,
+    Flag = "AutoBuyDarkBlade",
+    Callback = function(value)
+        ScriptSettings.AutoBuyDarkBlade = value
+    end
+})
+
+
+local GryphonToggle = Shop:CreateToggle({
+    Name = "Auto Buy Gryphon",
+    CurrentValue = false,
+    Flag = "AutoBuyGryphon",
+    Callback = function(value)
+        ScriptSettings.AutoBuyGryphon = value
+    end
+})
+
+
+
+
+-- Noclip Thread
+
+RunService.RenderStepped:Connect(function(deltaTime)
+    pcall(function()
+        if checkAutoFarmAvailable() or ScriptSettings.Noclip then
+            for _, child in pairs(LocalPlayer.Character:GetDescendants()) do
+                if child:IsA("BasePart") and child.CanCollide == true then
+                    child.CanCollide = false
+                end
+            end
+        end
+    end)
+end)
+
+-- Sub Thread
+
+coroutine.wrap(function()
+    while task.wait(.15) do
+        xpcall(function()
+            RequestInventory:FireServer()
+
+            if ScriptSettings.AutoEquipTool and ScriptSettings.SelectedTool then
+                equipTool(ScriptSettings.SelectedTool)
+            end
+
+        end, function(err)
+            print("[Sub Thread] NoName Hub Error:", err)
+        end)
+    end
+end)()
+
+-- Main Thread
+
+local Requirements = {
+    ["Dark Blade"] = {
+        ["Money"] = 250000,
+        ["Gems"] = 150
+    },
+    ["Gryphon"] = {
+        ["Money"] = 650000,
+        ["Gems"] = 650
+    }
+}
+
+function checkRequirements(item_name)
+    if not Requirements[item_name] then return false end
+
+    local all_passed = true
+
+    for i,v in Requirements[item_name] do
+        if not all_passed then break end
+
+        if i == "Money" then
+            local Money = LocalPlayer.Data.Money.Value
+            
+            if Money < v then
+                all_passed = false
+            end
+            continue
+        end
+
+        if i == "Gems" then
+            local Gems = LocalPlayer.Data.Gems.Value
+
+            if Gems < v then
+                all_passed = false
+            end
+            continue
+        end
+    end
+
+    return all_passed
+end
+
+function AutoBuy(npc, item_name, Toggle, Variable)
+    if Variable then
+        if checkOwns(item_name) then
+            Toggle:Set(false)
+            Rayfield:Notify({
+                Title = "NoName Hub",
+                Content = "You already own " .. item_name,
+                Duration = 3
+            })
+        else
+            if checkRequirements(item_name) then
+                PlayerTeleport.PreventFallAfterTeleport = false
+                PlayerTeleport:CustomTeleport((npc:FindFirstChild("HumanoidRootPart") and npc.HumanoidRootPart.CFrame) or npc:GetPivot(), CFrame.new(), false, true, false)
+                task.wait(1)
+
+                fireproximityprompt(npc:FindFirstChildWhichIsA("ProximityPrompt", true))
+
+                task.wait(.5)
+            end
+        end
+    end
+end
+
+coroutine.wrap(function()
+    while task.wait(.25) do
+        xpcall(function()
+
+            -- AutoBuy
+
+            AutoBuy(workspace.ServiceNPCs.DarkBladeNPC, "Dark Blade", DarkBladeToggle, ScriptSettings.AutoBuyDarkBlade)
+            AutoBuy(workspace.ServiceNPCs.GryphonBuyerNPC, "Gryphon", GryphonToggle, ScriptSettings.AutoBuyGryphon)
+
+            --
+
+            if ScriptSettings.AutoOpenAllChests then
+                for _, v in PlayerInventory.Items do
+                    if v.name:find("Chest") then
+                        useItem(v.name, v.quantity)
+                    end
+                end
+            end
+
+            if ScriptSettings.AutoQuest and checkAutoFarmAvailable() then
+                SettingsToggle:FireServer("EnableQuestRepeat", true)
+                SettingsToggle:FireServer("AutoQuestRepeat", true)
+
+                local questGiver, questData = getQuestForNPC(ScriptSettings.SelectedMob)
+                local currentQuest = getCurrentQuestTitle()
+
+                if isRepeatableQuest() == "NoQuest" then
+                    acceptQuest(questGiver)
+                else
+                    if questData and questData.title ~= currentQuest then
+                        declineRepeatableQuest()
+
+                        if isRepeatableQuest() == "NoQuest" then
+                            acceptQuest(questGiver)
+                        end
+                    end
+                end
+            end
+
+            if ScriptSettings.AutoFarmMob and ScriptSettings.SelectedMob then
+                PlayerTeleport.PreventFallAfterTeleport = true
+                autoFarmRegularNPC(ScriptSettings.SelectedMob)
+            end
+
+        end, function(err)
+            print("[Main Thread] NoName Hub Error:", err)
+        end)
+    end
+end)()
+
+Rayfield:LoadConfiguration()
