@@ -1,0 +1,626 @@
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+
+local Player = Players.LocalPlayer
+local TargetFolder = workspace:WaitForChild("LocalCandy2026")
+
+local FarmEnabled = false
+local NoclipEnabled = true
+local AntiFallEnabled = true
+
+local MovementMode = "Pathfinding"
+local TweenSpeed = 70
+local CollectDistance = 0.8
+local MaxCollectWait = 5
+local MinHeight = -50
+
+local FarmToken = 0
+local NoclipConnection = nil
+local BlockedTargets = {}
+local LastSafeCFrame = nil
+
+local function getCharacter()
+    local character = Player.Character
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return nil
+    end
+
+    return character, humanoid, root
+end
+
+local function isCharacterAlive()
+    local character, humanoid, root = getCharacter()
+
+    return character ~= nil
+        and humanoid ~= nil
+        and root ~= nil
+        and humanoid.Health > 0
+end
+
+local function applyNoclip()
+    if not NoclipEnabled then
+        return
+    end
+
+    local character = Player.Character
+    if not character then
+        return
+    end
+
+    for _, object in ipairs(character:GetDescendants()) do
+        if object:IsA("BasePart") then
+            object.CanCollide = false
+        end
+    end
+end
+
+local function startNoclip()
+    NoclipEnabled = true
+
+    if NoclipConnection then
+        return
+    end
+
+    applyNoclip()
+
+    NoclipConnection = RunService.PreSimulation:Connect(function()
+        if NoclipEnabled then
+            applyNoclip()
+        end
+    end)
+end
+
+local function stopNoclip()
+    NoclipEnabled = false
+
+    if NoclipConnection then
+        NoclipConnection:Disconnect()
+        NoclipConnection = nil
+    end
+end
+
+startNoclip()
+
+local function updateSafePosition()
+    if not AntiFallEnabled then
+        return
+    end
+
+    local character, humanoid, root = getCharacter()
+
+    if not character or not humanoid or not root then
+        return
+    end
+
+    if root.Position.Y < MinHeight then
+        if LastSafeCFrame then
+            root.CFrame = LastSafeCFrame
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+
+        return
+    end
+
+    if humanoid.FloorMaterial ~= Enum.Material.Air then
+        LastSafeCFrame = root.CFrame
+    end
+end
+
+RunService.Heartbeat:Connect(function()
+    if AntiFallEnabled then
+        updateSafePosition()
+    end
+end)
+
+local function getTargetPosition(target)
+    if not target or not target.Parent then
+        return nil
+    end
+
+    if target:IsA("BasePart") then
+        return target.Position
+    end
+
+    if target:IsA("Model") then
+        if target.PrimaryPart then
+            return target.PrimaryPart.Position
+        end
+
+        local part = target:FindFirstChildWhichIsA("BasePart", true)
+
+        if part then
+            return part.Position
+        end
+    end
+
+    return nil
+end
+
+local function isTargetValid(target)
+    if not target then
+        return false
+    end
+
+    if not target.Parent then
+        return false
+    end
+
+    if not target:IsDescendantOf(TargetFolder) then
+        return false
+    end
+
+    return getTargetPosition(target) ~= nil
+end
+
+local function getNearestTarget()
+    local _, _, root = getCharacter()
+
+    if not root then
+        return nil
+    end
+
+    local nearestPumpkin = nil
+    local nearestPumpkinDistance = math.huge
+    local nearestOther = nil
+    local nearestOtherDistance = math.huge
+
+    for _, target in ipairs(TargetFolder:GetChildren()) do
+        if isTargetValid(target) and not BlockedTargets[target] then
+            local position = getTargetPosition(target)
+
+            if position then
+                local distance = (root.Position - position).Magnitude
+
+                if target.Name == "SmashablePumpkin" then
+                    if distance < nearestPumpkinDistance then
+                        nearestPumpkinDistance = distance
+                        nearestPumpkin = target
+                    end
+                else
+                    if distance < nearestOtherDistance then
+                        nearestOtherDistance = distance
+                        nearestOther = target
+                    end
+                end
+            end
+        end
+    end
+
+    if nearestPumpkin then
+        return nearestPumpkin
+    end
+
+    return nearestOther
+end
+
+local function hardStop()
+    local _, humanoid, root = getCharacter()
+
+    if not humanoid or not root then
+        return
+    end
+
+    humanoid:Move(Vector3.zero, false)
+    humanoid:MoveTo(root.Position)
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end
+
+local function isCloseEnough(target)
+    if not isTargetValid(target) then
+        return false
+    end
+
+    local _, _, root = getCharacter()
+    local position = getTargetPosition(target)
+
+    if not root or not position then
+        return false
+    end
+
+    return (root.Position - position).Magnitude <= CollectDistance
+end
+
+local function waitUntilCollected(target, token)
+    hardStop()
+
+    local startTime = tick()
+
+    while isTargetValid(target) do
+        if not FarmEnabled or token ~= FarmToken then
+            return false
+        end
+
+        if not isCharacterAlive() then
+            return false
+        end
+
+        hardStop()
+
+        if tick() - startTime >= MaxCollectWait then
+            return false
+        end
+
+        task.wait(0.05)
+    end
+
+    return true
+end
+
+local function tryCollect(target, token)
+    if not isTargetValid(target) then
+        return true
+    end
+
+    if not isCloseEnough(target) then
+        return false
+    end
+
+    return waitUntilCollected(target, token)
+end
+
+local function createPath(destination)
+    local _, humanoid, root = getCharacter()
+
+    if not humanoid or not root then
+        return nil
+    end
+
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 1.5,
+        AgentHeight = 4,
+        AgentCanJump = true,
+        AgentCanClimb = true,
+        WaypointSpacing = 2
+    })
+
+    local success = pcall(function()
+        path:ComputeAsync(root.Position, destination)
+    end)
+
+    if not success then
+        return nil
+    end
+
+    if path.Status ~= Enum.PathStatus.Success then
+        return nil
+    end
+
+    return path
+end
+
+local function movePath(path, target, token)
+    local _, humanoid, root = getCharacter()
+
+    if not humanoid or not root then
+        return false
+    end
+
+    local waypoints = path:GetWaypoints()
+
+    if #waypoints == 0 then
+        return false
+    end
+
+    for _, waypoint in ipairs(waypoints) do
+        if not FarmEnabled or token ~= FarmToken then
+            return false
+        end
+
+        if not isCharacterAlive() then
+            return false
+        end
+
+        if isCloseEnough(target) then
+            return tryCollect(target, token)
+        end
+
+        if waypoint.Action == Enum.PathWaypointAction.Jump then
+            humanoid.Jump = true
+        end
+
+        humanoid:MoveTo(waypoint.Position)
+
+        local reached = false
+        local startTime = tick()
+
+        while tick() - startTime < 3 do
+            if not FarmEnabled or token ~= FarmToken then
+                return false
+            end
+
+            if not isCharacterAlive() then
+                return false
+            end
+
+            if isCloseEnough(target) then
+                return tryCollect(target, token)
+            end
+
+            local distance = (root.Position - waypoint.Position).Magnitude
+
+            if distance <= 2.5 then
+                reached = true
+                break
+            end
+
+            task.wait(0.05)
+        end
+
+        if not reached then
+            return false
+        end
+    end
+
+    if isCloseEnough(target) then
+        return tryCollect(target, token)
+    end
+
+    return false
+end
+
+local function tweenTo(target, token)
+    local _, humanoid, root = getCharacter()
+
+    if not humanoid or not root then
+        return false
+    end
+
+    local targetPosition = getTargetPosition(target)
+
+    if not targetPosition then
+        return false
+    end
+
+    local distance = (root.Position - targetPosition).Magnitude
+
+    if distance <= CollectDistance then
+        return tryCollect(target, token)
+    end
+
+    local duration = math.max(distance / TweenSpeed, 0.05)
+
+    local tween = TweenService:Create(
+        root,
+        TweenInfo.new(
+            duration,
+            Enum.EasingStyle.Linear,
+            Enum.EasingDirection.Out
+        ),
+        {
+            CFrame = CFrame.new(targetPosition)
+        }
+    )
+
+    local finished = false
+
+    local connection = tween.Completed:Connect(function()
+        finished = true
+    end)
+
+    tween:Play()
+
+    while not finished do
+        if not FarmEnabled or token ~= FarmToken then
+            tween:Cancel()
+            connection:Disconnect()
+            return false
+        end
+
+        if not isCharacterAlive() then
+            tween:Cancel()
+            connection:Disconnect()
+            return false
+        end
+
+        if isCloseEnough(target) then
+            tween:Cancel()
+            connection:Disconnect()
+            return tryCollect(target, token)
+        end
+
+        task.wait(0.03)
+    end
+
+    connection:Disconnect()
+
+    if isCloseEnough(target) then
+        return tryCollect(target, token)
+    end
+
+    return false
+end
+
+local function stopFarm()
+    FarmToken += 1
+    hardStop()
+end
+
+local function startFarm()
+    FarmToken += 1
+
+    local token = FarmToken
+
+    task.spawn(function()
+        while FarmEnabled and token == FarmToken do
+            if not isCharacterAlive() then
+                task.wait(0.5)
+                continue
+            end
+
+            local target = getNearestTarget()
+
+            if not target then
+                table.clear(BlockedTargets)
+                task.wait(0.2)
+                continue
+            end
+
+            local success = false
+
+            if MovementMode == "Tween" then
+                success = tweenTo(target, token)
+            else
+                local targetPosition = getTargetPosition(target)
+
+                if targetPosition then
+                    local path = createPath(targetPosition)
+
+                    if path then
+                        success = movePath(path, target, token)
+                    end
+                end
+            end
+
+            if success then
+                BlockedTargets[target] = nil
+            else
+                if isTargetValid(target) then
+                    BlockedTargets[target] = true
+                end
+            end
+
+            task.wait(0.05)
+        end
+
+        if token == FarmToken then
+            hardStop()
+        end
+    end)
+end
+
+Player.CharacterAdded:Connect(function()
+    task.wait(0.5)
+
+    LastSafeCFrame = nil
+
+    if NoclipEnabled then
+        applyNoclip()
+    end
+end)
+
+local Rayfield = loadstring(
+    game:HttpGet("https://sirius.menu/gen2")
+)()
+
+local Window = Rayfield:CreateWindow({
+    name = "Null",
+    subtitle = "Auto Collect Candy",
+    sidebarLayout = true
+})
+
+local FarmTab = Window:CreateTab({
+    name = "Farm"
+})
+
+FarmTab:CreateToggle({
+    name = "Auto Farm",
+    currentValue = false,
+    flag = "AutoFarm",
+
+    callback = function(Value)
+        FarmEnabled = Value
+
+        if Value then
+            table.clear(BlockedTargets)
+            startFarm()
+        else
+            stopFarm()
+        end
+    end
+})
+
+FarmTab:CreateToggle({
+    name = "Noclip",
+    currentValue = true,
+    flag = "Noclip",
+
+    callback = function(Value)
+        if Value then
+            startNoclip()
+        else
+            stopNoclip()
+        end
+    end
+})
+
+FarmTab:CreateToggle({
+    name = "Anti Fall",
+    currentValue = true,
+    flag = "AntiFall",
+
+    callback = function(Value)
+        AntiFallEnabled = Value
+
+        if Value then
+            local _, _, root = getCharacter()
+
+            if root then
+                LastSafeCFrame = root.CFrame
+            end
+        end
+    end
+})
+
+FarmTab:CreateDropdown({
+    name = "Movement Mode",
+
+    options = {
+        "Pathfinding",
+        "Tween"
+    },
+
+    currentOption = "Pathfinding",
+    flag = "MovementMode",
+
+    callback = function(Value)
+        if type(Value) == "table" then
+            MovementMode = Value[1]
+        else
+            MovementMode = Value
+        end
+    end
+})
+
+FarmTab:CreateSlider({
+    name = "Tween Speed",
+    range = {
+        10,
+        300
+    },
+    increment = 5,
+    suffix = " studs/s",
+    currentValue = 70,
+    flag = "TweenSpeed",
+
+    callback = function(Value)
+        TweenSpeed = Value
+    end
+})
+
+FarmTab:CreateSlider({
+    name = "Collect Distance",
+    range = {
+        0.3,
+        3
+    },
+    increment = 0.1,
+    suffix = " studs",
+    currentValue = 0.8,
+    flag = "CollectDistance",
+
+    callback = function(Value)
+        CollectDistance = Value
+    end
+})
